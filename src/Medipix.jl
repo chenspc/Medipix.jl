@@ -1,5 +1,14 @@
 module Medipix
 
+export @medipix
+export MedipixCommandPort, MedipixDataPort
+export MedipixCMD
+export medipix_get, medipix_set, medipix_cmd, medipix_help
+export make_medipix_message
+export check_medipix_response
+export parse_medipix_communication
+export parse_frame
+
 using Sockets
 
 macro medipix(type, name)
@@ -10,7 +19,11 @@ macro medipix(type, name)
         fn = Symbol(lowercase(join([type, name], '_')))
         return :($(esc(fn))(v) = make_medipix_message($type, $name; value=v))
     elseif type ∈ ["GET/SET", "SET/GET"]
-        return :(@medipix "GET" $name; @medipix "SET" $name)
+        # TODO: really want to write a recursive macro here..
+        # return :(@medipix "GET" $name; @medipix "SET" $name)
+        fn1 = Symbol(lowercase(join(["GET", name], '_')))
+        fn2 = Symbol(lowercase(join(["SET", name], '_')))
+        return :($(esc(fn1))() = make_medipix_message("GET", $name); $(esc(fn2))(v) = make_medipix_message("SET", $name; value=v))
     else
         @error "$type is not a valid Medipix command type (\"GET\", \"SET\", or \"CMD\")"
         return nothing
