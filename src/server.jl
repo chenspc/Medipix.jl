@@ -11,16 +11,24 @@ temp_hdr_path = "/Users/chen/Downloads/temp_hdr.txt";
 temp_data_path = "/Users/chen/Downloads/temp_data.txt"; 
 
 function server_startup(server_ip; cmd_port=6341, data_port=6342)
-    cmd_server = listen(medipix_ip, cmd_port)
-    data_server = listen(medipix_ip, data_port)
+    cmd_server = listen(server_ip, cmd_port)
+    data_server = listen(server_ip, data_port)
     return cmd_server, data_server
 end
 
 cmd_server, data_server = server_startup(medipix_ip)
 @async global cmd_sock = accept(cmd_server)
 @async global data_sock = accept(data_server)
-cmd_client = connect(medipix_ip, 6341)
-data_client = connect(medipix_ip, 6342)
+
+function client_startup(server_ip; cmd_port=6341, data_port=6342)
+    cmd_client = connect(server_ip, cmd_port)
+    data_client = connect(server_ip, data_port)
+    return cmd_client, data_client
+end
+
+# cmd_client = connect(medipix_ip, 6341)
+# data_client = connect(medipix_ip, 6342)
+cmd_client, data_client = client_startup(medipix_ip)
 
 global keep_medipix_servers_on = true
 global green_light = false
