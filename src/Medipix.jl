@@ -1,15 +1,40 @@
 module Medipix
 
 export @medipix
-export MedipixCommandPort, MedipixDataPort
-export MedipixCMD
-export medipix_get, medipix_set, medipix_cmd, medipix_help
+export check_connection, check_config
 export make_medipix_message
-export check_medipix_response
 export parse_communication
-export parse_image
+export check_medipix_response
+export parse_data, parse_image
+export to_config, from_config
 
-using Sockets
+export cmd_reset
+export cmd_abort
+export cmd_startacquisition
+export cmd_stopacquisition
+export cmd_clearerror
+export cmd_softtrigger
+export get_detectorstatus
+export get_errorcode
+export get_tcpconnected
+export get_continuousrw, set_continuousrw
+export get_acquisitiontime, set_acquisitiontime
+export get_acquisitionperiod, set_acquisitionperiod
+export get_counterdepth, set_counterdepth
+export get_numframestoacquire, set_numframestoacquire
+export get_numframespertrigger, set_numframespertrigger
+export get_runheadless, set_runheadless
+export get_fileformat, set_fileformat
+export get_imagesperfile, set_imagesperfile
+export get_fileenable, set_fileenable
+export get_usetimestamping, set_usetimestamping
+export get_triggerstart, set_triggerstart
+export get_triggerstop, set_triggerstop
+export get_triggeroutttl, set_triggeroutttl
+
+using Sockets: @ip_str, IPv4, connect
+using Dates: now
+using HDF5: h5open, attributes, h5write
 
 macro medipix(type, name)
     if type ∈ ["GET", "CMD"] 
@@ -20,7 +45,6 @@ macro medipix(type, name)
         return :($(esc(fn))(v) = make_medipix_message($type, $name; value=v))
     elseif type ∈ ["GET/SET", "SET/GET"]
         # TODO: really want to write a recursive macro here..
-        # return :(@medipix "GET" $name; @medipix "SET" $name)
         fn1 = Symbol(lowercase(join(["GET", name], '_')))
         fn2 = Symbol(lowercase(join(["SET", name], '_')))
         return :($(esc(fn1))() = make_medipix_message("GET", $name); $(esc(fn2))(v) = make_medipix_message("SET", $name; value=v))
@@ -30,70 +54,47 @@ macro medipix(type, name)
     end
 end
 
-abstract type MedipixPort end
+# Common commands
+@medipix "CMD" "RESET"
+@medipix "CMD" "ABORT"
+@medipix "CMD" "STARTACQUISITION"
+@medipix "CMD" "STOPACQUISITION"
+@medipix "CMD" "CLEARERROR"
+@medipix "CMD" "SOFTTRIGGER"
+@medipix "GET" "DETECTORSTATUS"
+@medipix "GET" "ERRORCODE"
+@medipix "GET" "TCPCONNECTED"
+@medipix "GET/SET" "CONTINUOUSRW"
+@medipix "GET/SET" "ACQUISITIONTIME" 
+@medipix "GET/SET" "ACQUISITIONPERIOD"
+@medipix "GET/SET" "COUNTERDEPTH"
+@medipix "GET/SET" "NUMFRAMESTOACQUIRE"
+@medipix "GET/SET" "NUMFRAMESPERTRIGGER"
+@medipix "GET/SET" "RUNHEADLESS"
+@medipix "GET/SET" "FILEFORMAT"
+@medipix "GET/SET" "IMAGESPERFILE"
+@medipix "GET/SET" "FILEENABLE"
+@medipix "GET/SET" "USETIMESTAMPING"
+@medipix "GET/SET" "TRIGGERSTART"
+@medipix "GET/SET" "TRIGGERSTOP"
+@medipix "GET/SET" "TRIGGEROUTTTL"
+@medipix "GET/SET" "SCANX"
+@medipix "GET/SET" "SCANY"
 
-struct MedipixCommandPort <: MedipixPort 
-    ip::IPv4
-    port::Int
-end
-MedipixCommandPort(ip) = MedipixCommandPort(ip, 6341)
-
-struct MedipixDataPort <: MedipixPort 
-    ip::IPv4
-    port::Int
-end
-MedipixDataPort(ip) = MedipixDataPort(ip, 6342)
-
-# abstract type MedipixCommand end
-
-# struct MedipixCMD <: MedipixCommand
-#     name::String
-# end
-
-# abstract type MedipixParameter end
-# struct MedipixMutableParameter{T} <: MedipixParameter where T <: Union{Int, Float32, String}
-#     name::String
-#     value::T
-# end
-
-# struct MedipixImmutableParameter{T} <: MedipixParameter where T <: Union{Int, Float32, String}
-#     name::String
-#     value::T
-# end
-
-struct MedipixImage{T} where T 
-    id::UInt
+struct MedipixData{T}
+    id::Int64
     header::String
-    data::T
+    data::Matrix{T}
 end
-
 
 function check_connection()
-    
 end
 
-function check_config()
-    
+function medipix_connect(medipix_ip::IPv4; cmd_port=6341, data_port=6342)
+    data_client = connect(medipix_ip, data_port)
+     cmd_client = connect(medipix_ip, cmd_port)
+   return cmd_client, data_client
 end
-
-# function medipix_get(p::MedipixParameter)
-#     type = "GET"
-#     msg = make_medipix_message(type, p.name)
-# end
-
-# function medipix_set(p::MedipixMutableParameter, v)
-#     type = "SET"
-#     msg = make_medipix_message(type, p.name; value=v)
-# end
-
-# function medipix_cmd(c::MedipixCMD, port::MedipixCommandPort)
-#     type = "CMD"
-#     msg = make_medipix_message(type, c.name)
-# end
-
-# function medipix_help(x::MedipixCommand)
-    
-# end
 
 function make_medipix_message(type::String, name::String; value="", prefix="MPX")
     body = ',' * type * ',' * name 
@@ -102,24 +103,36 @@ function make_medipix_message(type::String, name::String; value="", prefix="MPX"
     return head * body * tail
 end
 
-function parse_communication(io::IO)
-    # TODO: add a mechanism to keep reading until "MPX" appears.
-    is_mpx = readuntil(io, ',') == "MPX"
-    if is_mpx
-        message_size = parse(Int, readuntil(io, ','))
-        message = read(io, message_size - 1)
-        success, value = check_medipix_response(message)
+function send_cmd(cmd_client::IO, cmd::String; verbose=false)
+    write(cmd_client, cmd)
+    success, value, message = parse_communication(cmd_client)
+    if success
+        # put!(channel, string(now()) * "   " * message)
+        verbose ? println(string(now()) * "   " * message) : nothing
     else
-        # message = Vector{UInt8}()
-        success = false
-        value = nothing
+        @warn "Failed to execute command: " * cmd
     end
-    return success, value
+    return value
+end
+send_cmd(cmd_client::IO, cmds::Vector{String}; kwargs...) = [send_cmd(cmd_client, cmd; kwargs...) for cmd in cmds]
+
+function parse_communication(io::IO)
+    is_mpx = false
+    while !is_mpx
+        buffer = readuntil(io, ',')
+        if length(buffer) >= 3
+            is_mpx = buffer[end-2:end] == "MPX"
+        end
+    end
+    message_size = parse(Int, readuntil(io, ','))
+    message = String(read(io, message_size - 1))
+    success, value = check_medipix_response(message)
+    return success, value, message
 end
 
-function check_medipix_response(cmd_bytes)
-    # TODO: response should be logged in the future
-    phrases = split(String(cmd_bytes), ',')
+function check_medipix_response(message)
+    # TODO: Add an option to log the response 
+    phrases = split(message, ',')
     if length(phrases) == 3
         type, name, status = phrases
         value = nothing
@@ -142,53 +155,79 @@ function check_medipix_response(cmd_bytes)
     return success, value
 end
 
-function parse_data(io::IO; filepath="", live_processing=true)
-    is_mpx = readuntil(io, ',') == "MPX"
-    comm_size = parse(Int, readuntil(io, ','))
-    hdr_or_frame = peek(io, Char)
-    if comm_size > 0
-        if hdr_or_frame == 'H'
-            hdr = String(read(io, message_size - 1))
-            return hdr
-        elseif hdr_or_frame == 'M'
-            hdr = ""
-            image = parse_image(io)
-            return image
-        else
-            @error "Unknown data stream type."
-            return nothing
+function parse_data(io::IO, c::Channel; live_processing=true)
+    is_mpx = false
+    while isopen(c)
+        while !is_mpx
+            buffer = readuntil(io, ',')
+            if length(buffer) >= 3
+                is_mpx = buffer[end-2:end] == "MPX"
+            end
         end
-    else
-        @error "No data available to read."
+        data_size = parse(Int, readuntil(io, ','))
+        hdr_or_frame = peek(io, Char)
+        if is_mpx && data_size > 0
+            if hdr_or_frame == 'H'
+                hdr = String(read(io, data_size - 1))
+                put!(c, MedipixData(0, hdr, Matrix{UInt8}(undef, 1, 1)))
+                return hdr
+            elseif hdr_or_frame == 'M'
+                data = read(io, data_size - 1)
+                parse_image(data, c)
+                return data
+            else
+                @error "Unknown data stream type."
+            end
+        else
+            @error "No data available to read."
+        end
     end
+    return
 end
 
-function parse_image(data_bytes; header_size=768)
-    # TODO: change to accept io?
-    buffer = IOBuffer(data_bytes)
-    header_string = String(read(buffer, default_header_size))
-
+# function parse_image(c_in::Channel; c_out::Channel; header_size=768)
+function parse_image(frame_bytes::Vector{UInt8}, c::Channel; header_size=768)
+    # frame_bytes = take!(c)
+    header_string = String(frame_bytes[1:header_size])
     header_split = split(header_string, ',')
     image_id, header_size, dim_x, dim_y = parse.(Int, getindex(header_split, [2, 3, 5, 6]))
 
-    # TODO: R64 may not work, but can be ignored for now?
+    # TODO: R64 may not work, but can be ignored for now since it's not the bottleneck.
     type_dict = Dict("U1" => UInt8, "U8" => UInt8, "U08" => UInt8, 
                     "U16" => UInt16, "U32" => UInt32, "U64" => UInt64, 
-                    "R64" => UInt64)
+                    "R64" => UInt16)
     data_type = type_dict[header_split[7]]
-
-    if header_size != default_header_size
-        header_string = String(read(seekstart(buffer), header_size))
-    end
-
-    image = Array{data_type}(undef, dim_x, dim_y)
-    read!(buffer, image)
-
-    # return image_id, header_string, hton.(image)
-    return MedipixImage(image_id, header_string, hton.(image))
+    # hton.(read(io, image))? Change endianness if needed. 
+    # image = Matrix{data_type}(undef, dim_x, dim_y)
+    image = reshape(reinterpret(data_type, frame_bytes[header_size+1:end]), (dim_x, dim_y))
+    put!(c, MedipixData(image_id, header_string, hton.(image)))
+    return nothing 
 end
 
-function to_config(filename, cmds::Vector{String})
+function acquisition(cmd_client, data_client, c_out::Channel; config_file::String="", cmds::Vector{String}=[""], verbose=false, kwargs...)
+    detector_ready = is_medipix_ready(cmd_client; verbose=verbose)
+    if !detector_ready
+        send_cmd(cmd_client, cmd_abort())
+        send_cmd(cmd_client, cmd_clear())
+        send_cmd(cmd_client, cmd_reset())
+        sleep(3)
+    end
+    file_cmds = from_config(config_file; kwargs...)
+    send_cmd(cmd_client, [file_cmds; cmds]; verbose=verbose)
+    data_server_ready = send_cmd(cmd_client, get_tcpconnected(); verbose=verbose) == "1"
+    if data_server_ready 
+        n = get_numframespertrigger()
+        send_cmd(cmd_client, cmd_startacquisition(); verbose=verbose)
+        for i in range(1, length = n+1)
+            parse_data(data_client, c_out)
+        end
+    else
+        @warn "Data client is not connected to the server. Acquisition aborted."
+    end
+    return nothing
+end
+
+function to_config(filename::String, cmds::Vector{String})
     open(filename, "w") do f
         for l in cmds
             cmd = replace(l, r"MPX,[0-9]*,"=>"")
@@ -196,7 +235,7 @@ function to_config(filename, cmds::Vector{String})
         end
     end
 end
-to_config(filename, cmd::String) = to_config(filename, [cmd])
+to_config(filename::String, cmd::String) = to_config(filename, [cmd])
 
 function from_config(config_input::AbstractString; prefix="MPX", loaded_files=Vector{String}(), print_trace=false)
     cmds = Vector{String}()
@@ -219,4 +258,60 @@ function from_config(config_input::AbstractString; prefix="MPX", loaded_files=Ve
     return cmds 
 end
 
+function is_medipix_ready(cmd_client; verbose=false)
+    status = send_cmd(cmd_client, get_detectorstatus())
+    isready = status == "0" 
+    if verbose == true
+        status_dict = Dict("0" => "Idle", "1" => "Busy", "2" => "Standby", "3" => "Error", "4" => "Armed", "5" => "Init")
+        println(string(now()) * "   " * "Detector status: " * status_dict[status])
+    end
+    return isready
 end
+
+function ptycho_initialisation(n_data::Int, n_processors::Int, n_writer::Int)
+    cmd_client, data_client = medipix_connect(medipix_ip)
+    c_data
+    return c_d2p, c_p2w
+end 
+
+# file_writer will take in multiple channels (containing the same type of data) and write to files.
+# function file_writer(filename::String, c_in::Channel; n_writers=1, ext=".hdf5")
+function file_writer(filename::String, c_group::Vector{Channel}; n_writers=1, ext=".hdf5")
+    filenames = [filename * lpad(i, 4, "0") for i in 1:n_writers]
+    # @async for w in 1:n_writers
+    for w in 1:n_writers
+        # fid = h5open(filenames[w] * ext, "cw") 
+        # @async while isopen(c_in)
+        if isopen(c_in)
+            # for i in 1:100
+            for i in 1:length(c_in.data)
+                image = take!(c_in)
+                data_name = "frame_" * lpad(image.id, 8, "0")
+                # fid[data_name] = image.data
+                # attributes(data_name)[header] = image.header
+                h5write(filenames[w] * ".hdf", data_name * "/image", image.data)
+                h5write(filenames[w] * ".hdf", data_name * "/header", strip(image.header, '\0'))
+            end
+        end
+    end
+end
+
+end # module
+
+
+
+# do_scan(cmd_client, data_client, 128, 128)
+# function do_scan(cmd_client, data_client, nx, ny)
+#     send_cmd(cmd_client, set_scanx(nx))
+#     send_cmd(cmd_client, set_scany(ny))
+#     c = Channel(nx * ny + 1)
+#     send_cmd(cmd_client, cmd_startacquisition(); verbose=true)
+#     [parse_data(data_client, c) for i in range(1, length=nx * ny + 1)]
+#     return c
+# end
+
+# Threads.@threads for _ in 1:nthreads()
+#     for n in c_data
+#         parse_data
+#     end
+
