@@ -12,6 +12,7 @@ export parse_communication
 export check_medipix_response
 export parse_data, parse_image
 export acquisition
+export stream_acquisition
 export to_config, from_config
 export is_medipix_ready
 export troubleshoot
@@ -41,6 +42,7 @@ export get_usetimestamping, set_usetimestamping
 export get_triggerstart, set_triggerstart
 export get_triggerstop, set_triggerstop
 export get_triggeroutttl, set_triggeroutttl
+export get_triggeroutttlinvert, set_triggeroutttlinvert
 export get_scanx, set_scanx
 export get_scany, set_scany
 
@@ -48,6 +50,7 @@ using Sockets: @ip_str, IPv4, TCPSocket, connect
 export @ip_str
 using Dates: now
 using HDF5: h5open, attributes, h5write
+using Distributed: @spawnat
 
 macro medipix(type, name)
     if type ∈ ["GET", "CMD"] 
@@ -91,6 +94,7 @@ end
 @medipix "GET/SET" "TRIGGERSTART"
 @medipix "GET/SET" "TRIGGERSTOP"
 @medipix "GET/SET" "TRIGGEROUTTTL"
+@medipix "GET/SET" "TriggerOutTTLInvert"
 @medipix "GET/SET" "SCANX"
 @medipix "GET/SET" "SCANY"
 
@@ -204,7 +208,7 @@ function check_medipix_response(message)
     return success, value
 end
 
-function parse_data(io::IO, c::Channel; live_processing=true)
+function parse_data(io::IO, c; live_processing=true)
     is_mpx = false
     while isopen(c)
         while !is_mpx
@@ -222,7 +226,7 @@ function parse_data(io::IO, c::Channel; live_processing=true)
                 return hdr
             elseif hdr_or_frame == 'M'
                 data = read(io, data_size - 1)
-                parse_image(data, c)
+                @spawnat :any parse_image(data, c)
                 return data
             else
                 @error "Unknown data stream type."
@@ -234,7 +238,7 @@ function parse_data(io::IO, c::Channel; live_processing=true)
     return
 end
 
-function parse_image(frame_bytes::Vector{UInt8}, c::Channel; header_size=768)
+function parse_image(frame_bytes::Vector{UInt8}, c; header_size=768)
     header_string = String(frame_bytes[1:header_size])
     header_split = split(header_string, ',')
     image_id, header_size, dim_x, dim_y = parse.(Int, getindex(header_split, [2, 3, 5, 6]))
@@ -250,6 +254,43 @@ function parse_image(frame_bytes::Vector{UInt8}, c::Channel; header_size=768)
 end
 
 function acquisition(m::MedipixConnection, c_out::Channel; config_file::String="", cmds::Vector{String}=[""], verbose=false, kwargs...)
+    check_connection(m)
+    
+    if !is_medipix_ready(m.cmd_client; verbose=verbose)
+        send_cmd(m.cmd_client, cmd_abort(); verbose=verbose)
+        sleep(3)
+        send_cmd(m.cmd_client, cmd_clearerror(); verbose=verbose)
+    else
+        if !is_medipix_ready(m.cmd_client; verbose=verbose)
+            send_cmd(m.cmd_client, cmd_reset(); verbose=verbose)
+            sleep(10)
+            send_cmd(m.cmd_client, cmd_abort(); verbose=verbose)
+            sleep(3)
+            send_cmd(m.cmd_client, cmd_clearerror(); verbose=verbose)
+            medipix_connect!(m)
+            check_connection(m)
+        end
+    end
+    if isfile(config_file)
+        file_cmds = from_config(config_file; kwargs...)
+    else
+        file_cmds = [""]
+    end
+    send_cmd(m.cmd_client, vcat(file_cmds, cmds); verbose=verbose)
+    data_server_ready = send_cmd(m.cmd_client, get_tcpconnected(); verbose=verbose) == "1"
+    if data_server_ready 
+        n = parse(Int, send_cmd(m.cmd_client, get_numframestoacquire(); verbose=verbose))
+        send_cmd(m.cmd_client, cmd_startacquisition(); verbose=verbose)
+        @async for i in range(1, length = n+1)
+            parse_data(m.data_client, c_out)
+        end
+    else
+        @warn "Data client is not connected to the server. Acquisition aborted."
+    end
+    return nothing
+end
+
+function stream_acquisition(m::MedipixConnection, c_out; config_file::String="", cmds::Vector{String}=[""], verbose=false, kwargs...)
     check_connection(m)
     
     if !is_medipix_ready(m.cmd_client; verbose=verbose)
@@ -349,15 +390,19 @@ function ptycho_initialisation(n_data::Int, n_processors::Int, n_writer::Int)
     return c_d2p, c_p2w
 end 
 
-function file_writer(filename::String, c_in::Channel; n_writers=1)
+function file_writer(filename::String, c_in; n_writers=1)
     filenames = [filename * "_" * lpad(i, 4, "0") for i in 1:n_writers]
     @async for w in 1:n_writers
         while isopen(c_in) 
             wait(c_in)
             image = take!(c_in)
-            data_name = "frame_" * lpad(image.id, 8, "0")
-            h5write(filenames[w] * ".h5", data_name * "/image", image.data)
-            h5write(filenames[w] * ".h5", data_name * "/header", strip(image.header, '\0'))
+            f_str = lpad(image.id, 16, "0")
+            group_name = f_str[1:end-4]
+            data_name = f_str[end-3:end]
+            # h5write(filenames[w] * ".h5", data_name * "/image", image.data)
+            # h5write(filenames[w] * ".h5", data_name * "/header", strip(image.header, '\0'))
+            h5write(filenames[w] * ".h5", "/group_" * group_name * "/image_" * data_name, image.data)
+            h5write(filenames[w] * ".h5", "/group_" * group_name * "/header_" * data_name, strip(image.header, '\0'))
         end
     end
 end
