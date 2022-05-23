@@ -34,7 +34,13 @@ export get_triggeroutttl, set_triggeroutttl
 
 using Sockets: @ip_str, IPv4, connect
 using Dates: now
+<<<<<<< Updated upstream
 using HDF5: h5open, attributes, h5write
+=======
+using HDF5: h5write
+using Distributed: @spawnat, myid
+using .Threads: @spawn
+>>>>>>> Stashed changes
 
 macro medipix(type, name)
     if type ∈ ["GET", "CMD"] 
@@ -84,7 +90,13 @@ end
 struct MedipixData{T}
     id::Int64
     header::String
+<<<<<<< Updated upstream
     data::Matrix{T}
+=======
+    data::Matrix
+    gen_time::String
+    pid::Int
+>>>>>>> Stashed changes
 end
 
 function check_connection()
@@ -164,6 +176,7 @@ function parse_data(io::IO, c::Channel; live_processing=true)
                 is_mpx = buffer[end-2:end] == "MPX"
             end
         end
+<<<<<<< Updated upstream
         data_size = parse(Int, readuntil(io, ','))
         hdr_or_frame = peek(io, Char)
         if is_mpx && data_size > 0
@@ -178,6 +191,20 @@ function parse_data(io::IO, c::Channel; live_processing=true)
             else
                 @error "Unknown data stream type."
             end
+=======
+    end
+    data_size = parse(Int, readuntil(io, ','))
+    hdr_or_frame = peek(io, Char)
+    if data_size > 0
+        if hdr_or_frame == 'H'
+            hdr = String(read(io, data_size - 1))
+            # put!(c, MedipixData(0, hdr, Matrix{UInt8}(undef, 1, 1)))
+            put!(c, MedipixData(0, hdr, Matrix{UInt8}(undef, 1, 1), string(now()), myid()))
+        elseif hdr_or_frame == 'M'
+            data = read(io, data_size - 1)
+            @async @spawnat :any parse_image(data, c)
+            # @spawn parse_image(data, c)
+>>>>>>> Stashed changes
         else
             @error "No data available to read."
         end
@@ -200,7 +227,12 @@ function parse_image(frame_bytes::Vector{UInt8}, c::Channel; header_size=768)
     # hton.(read(io, image))? Change endianness if needed. 
     # image = Matrix{data_type}(undef, dim_x, dim_y)
     image = reshape(reinterpret(data_type, frame_bytes[header_size+1:end]), (dim_x, dim_y))
+<<<<<<< Updated upstream
     put!(c, MedipixData(image_id, header_string, hton.(image)))
+=======
+    # put!(c, MedipixData(image_id, header_string, image))
+    put!(c, MedipixData(image_id, header_string, image, string(now()), myid()))
+>>>>>>> Stashed changes
     return nothing 
 end
 
@@ -216,10 +248,19 @@ function acquisition(cmd_client, data_client, c_out::Channel; config_file::Strin
     send_cmd(cmd_client, [file_cmds; cmds]; verbose=verbose)
     data_server_ready = send_cmd(cmd_client, get_tcpconnected(); verbose=verbose) == "1"
     if data_server_ready 
+<<<<<<< Updated upstream
         n = get_numframespertrigger()
         send_cmd(cmd_client, cmd_startacquisition(); verbose=verbose)
         for i in range(1, length = n+1)
             parse_data(data_client, c_out)
+=======
+        n = parse(Int, send_cmd(m, get_numframestoacquire(); verbose=verbose))
+        send_cmd(m, cmd_startacquisition(); verbose=verbose)
+        # @async for i in range(1, length = n+1)
+        for i in range(1, length = n+1)
+            # parse_data(m.data_client, c_out)
+            parse_data(m.data_client, c_out[mod(i, length(c_out))+1])
+>>>>>>> Stashed changes
         end
     else
         @warn "Data client is not connected to the server. Acquisition aborted."
@@ -268,6 +309,7 @@ function is_medipix_ready(cmd_client; verbose=false)
     return isready
 end
 
+<<<<<<< Updated upstream
 function ptycho_initialisation(n_data::Int, n_processors::Int, n_writer::Int)
     cmd_client, data_client = medipix_connect(medipix_ip)
     c_data
@@ -293,6 +335,50 @@ function file_writer(filename::String, c_group::Vector{Channel}; n_writers=1, ex
                 h5write(filenames[w] * ".hdf", data_name * "/header", strip(image.header, '\0'))
             end
         end
+=======
+function abort_and_clear(m::MedipixConnection; verbose=false)
+    send_cmd(m, cmd_abort(); verbose=verbose)
+    sleep(3)
+    push!(m.cmd_log, "[" * string(now()) *"]\tDUMP: " * String(readavailable(m.cmd_client)))
+    send_cmd(m, cmd_clearerror(); verbose=verbose)
+end
+
+function troubleshoot(m::MedipixConnection; do_not_reset=true, verbose=true)
+    status_dict = Dict("0" => "Idle", "1" => "Busy", "2" => "Standby", "3" => "Error", "4" => "Armed", "5" => "Init")
+    status = status_dict(send_cmd(c, get_detectorstatus(); verbose=verbose))
+    if status == "Busy"
+        abort_and_clear(m; verbose=verbose)
+    elseif status == "Standby"
+    elseif status == "Error"
+        abort_and_clear(m; verbose=verbose)
+    elseif status == "Armed"
+    elseif status == "Init"
+    else
+    end
+    return nothing
+end
+
+function file_writer(filename::String, c; max_digits=8)
+    @async while isopen(c) 
+        wait(c)
+        image = take!(c)
+        length(digits(image.id)) > max_digits ? max_digits += 4 : nothing
+        id_str = lpad(image.id, max_digits, "0")
+        group_name = id_str[1:end-4]
+        data_name = id_str[end-3:end]
+        h5write(filename * ".h5", "/group_" * group_name * "/image_" * data_name, image.data)
+        h5write(filename * ".h5", "/group_" * group_name * "/header_" * data_name, strip(image.header, '\0'))
+        h5write(filename * ".h5", "/group_" * group_name * "/gen_time_" * data_name, image.gen_time)
+        h5write(filename * ".h5", "/group_" * group_name * "/pid_" * data_name, image.pid)
+        # h5write(filename * ".h5", "/group_" * group_name * "/write_time_" * data_name, string(now()))
+    end
+end
+
+function file_writers(filename::String, c; max_digits=8, nwriter=2, proc_ids=range(2, length=nwriter))
+    filenames = [filename * lpad(i, 4, "0") for i in 1:nwriter]
+    for w in nwriter
+        @spawnat proc_ids[w] file_writer(filenames[w], c; max_digits=max_digits)
+>>>>>>> Stashed changes
     end
 end
 
