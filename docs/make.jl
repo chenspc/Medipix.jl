@@ -1,16 +1,16 @@
-using MedipixMerlinEM
+using Medipix
 using Documenter
 
-DocMeta.setdocmeta!(MedipixMerlinEM, :DocTestSetup, :(using MedipixMerlinEM); recursive=true)
+DocMeta.setdocmeta!(Medipix, :DocTestSetup, :(using Medipix); recursive=true)
 
 makedocs(;
-    modules=[MedipixMerlinEM],
+    modules=[Medipix],
     authors="Chen Huang <chen1huang2@gmail.com> and contributors",
-    repo="https://github.com/chenspc/MedipixMerlinEM.jl/blob/{commit}{path}#{line}",
-    sitename="MedipixMerlinEM.jl",
+    repo="https://github.com/chenspc/Medipix.jl/blob/{commit}{path}#{line}",
+    sitename="Medipix.jl",
     format=Documenter.HTML(;
         prettyurls=get(ENV, "CI", "false") == "true",
-        canonical="https://chenspc.github.io/MedipixMerlinEM.jl",
+        canonical="https://chenspc.github.io/Medipix.jl",
         assets=String[],
     ),
     pages=[
@@ -19,5 +19,5 @@ makedocs(;
 )
 
 deploydocs(;
-    repo="github.com/chenspc/MedipixMerlinEM.jl",
+    repo="github.com/chenspc/Medipix.jl",
 )

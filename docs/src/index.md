@@ -1,12 +1,12 @@
 ```@meta
-CurrentModule = MedipixMerlinEM
+CurrentModule = Medipix
 ```
 
-# MedipixMerlinEM
+# Medipix
 
 ```@index
 ```
 
 ```@autodocs
-Modules = [MedipixMerlinEM]
+Modules = [Medipix]
 ```

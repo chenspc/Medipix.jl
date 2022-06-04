@@ -1,3 +1,3 @@
 [deps]
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
-MedipixMerlinEM = "c2036f84-fecd-45db-822d-61dbed506f2f"
+Medipix = "c2036f84-fecd-45db-822d-61dbed506f2f"

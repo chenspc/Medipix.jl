@@ -1,4 +1,4 @@
-module MedipixMerlinEM
+module Medipix
 
 export MedipixData
 export MedipixConnection

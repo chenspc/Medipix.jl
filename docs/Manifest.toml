@@ -177,7 +177,7 @@ deps = ["Artifacts", "Libdl"]
 uuid = "c8ffd9c3-330d-5841-b78e-0817d7145fa1"
 version = "2.28.0+0"
 
-[[MedipixMerlinEM]]
+[[Medipix]]
 deps = ["DataFrames", "Dates", "Distributed", "HDF5", "Sockets"]
 path = ".."
 uuid = "c2036f84-fecd-45db-822d-61dbed506f2f"
