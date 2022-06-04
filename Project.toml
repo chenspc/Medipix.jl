@@ -12,7 +12,7 @@ Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 
 [compat]
 DataFrames = "1"
-HDF5 = "0.16"
+HDF5 = "0.16, 1.0"
 julia = "1.5"
 
 [extras]
