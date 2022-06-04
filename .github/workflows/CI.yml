@@ -54,9 +54,9 @@ jobs:
       - run: |
           julia --project=docs -e '
             using Documenter: DocMeta, doctest
-            using Medipix
-            DocMeta.setdocmeta!(Medipix, :DocTestSetup, :(using Medipix); recursive=true)
-            doctest(Medipix)'
+            using MedipixMerlinEM
+            DocMeta.setdocmeta!(MedipixMerlinEM, :DocTestSetup, :(using MedipixMerlinEM); recursive=true)
+            doctest(MedipixMerlinEM)'
       - run: julia --project=docs docs/make.jl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
