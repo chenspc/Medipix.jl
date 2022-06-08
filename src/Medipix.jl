@@ -43,9 +43,11 @@ export get_scany, set_scany
 
 using Sockets: @ip_str, IPv4, TCPSocket, connect
 export @ip_str
-using Dates: now
+using Dates
 using HDF5: h5write
 using Distributed: @spawnat
+
+export load_mib
 
 macro medipix(type, name)
     if type ∈ ["GET", "CMD"] 
@@ -109,6 +111,85 @@ mutable struct MedipixConnection
 end
 MedipixConnection(ip::IPv4, cmd_port::Int, data_port::Int) = MedipixConnection(ip, cmd_port, data_port, connect(ip, cmd_port), connect(ip, data_port), Vector{String}())
 MedipixConnection(ip::IPv4) = MedipixConnection(ip, 6341, 6342)
+
+abstract type AbstractMIBHeader end
+
+struct MIBHeader <: AbstractMIBHeader
+    id::Int
+    offset::Int
+    nchip::Int
+    dims::Vector{Int}
+    data_type::DataType
+    chip_dims::Vector{Int}
+    time::DateTime
+    exposure_s::Float64
+    image_bit_depth::Int
+    raw::Bool
+end
+
+function load_mib(filepath::AbstractString; kwargs...)
+    first_header = firstheader(filepath)
+    images, headers = read_mib(filepath, first_header; kwargs...)
+    return images, headers
+end
+
+function read_mib(filepath::AbstractString, first_header::AbstractMIBHeader; range=[1,typemax(Int)])
+    offset = first_header.offset
+    type = first_header.data_type
+    dims = first_header.dims
+    raw = first_header.raw
+    image_bit_depth = first_header.image_bit_depth
+
+    fid = open(filepath, "r")
+    headers = Vector{MIBHeader}()
+    if raw
+        depth_dict = Dict(1 => UInt8, 6 => UInt8, 12 => UInt16,
+                          24 => UInt32, 48 => UInt64)
+        type = depth_dict[image_bit_depth]
+    end
+        buffer = Array{type}(undef, dims[1], dims[2])
+        images = Vector{Array{type, 2}}()
+
+    n = 0
+    while eof(fid) == false && n < range[2]
+            header_string = read(fid, offset)
+            read!(fid, buffer)
+            n += 1
+            if n >= range[1]
+                push!(headers, make_mibheader(String(header_string); id=n))
+                push!(images, hton.(buffer))
+            end
+    end
+    close(fid)
+    return images, headers
+end
+
+function firstheader(filepath)
+    fid = open(filepath)
+    trial = split(String(read(fid, 768)), ",")
+    offset = parse(Int, trial[3])
+    seekstart(fid)
+    header_string = String(read(fid, offset))
+    close(fid)
+    first_header = make_mibheader(header_string; id=1)
+    return first_header
+end
+
+function make_mibheader(header_string::AbstractString; id=0)
+    header = split(header_string, ",")
+    offset = parse(Int, header[3])
+    nchip = parse(Int, header[4])
+    dims = parse.(Int, header[5:6])
+    type_dict = Dict("U1" => UInt8, "U8" => UInt8, "U08" => UInt8, "U16" => UInt16,
+                     "U32" => UInt32, "U64" => UInt64, "R64" => UInt64)
+    data_type = type_dict[header[7]]
+    chip_dims = parse.(Int, split(lstrip(header[8]), "x"))
+    time = DateTime(header[10][1:end-3], "y-m-d H:M:S.s")
+    exposure_s = parse(Float64, header[11])
+    image_bit_depth = parse(Int, header[end-1])
+    raw = header[7] == "R64"
+    return MIBHeader(id, offset, nchip, dims, data_type, chip_dims, time, exposure_s, image_bit_depth, raw)
+end
 
 function check_connection(m::MedipixConnection)
     if !isopen(m.cmd_client)
