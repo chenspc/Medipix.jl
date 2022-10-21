@@ -40,12 +40,13 @@ export get_triggeroutttl, set_triggeroutttl
 export get_triggeroutttlinvert, set_triggeroutttlinvert
 export get_scanx, set_scanx
 export get_scany, set_scany
+export get_selectchips, set_selectchips
 
 using Sockets: @ip_str, IPv4, TCPSocket, connect
 export @ip_str
 using Dates
 using HDF5: h5write
-using Distributed: @spawnat
+using Distributed: @spawnat, myid
 
 export load_mib
 
@@ -94,6 +95,7 @@ end
 @medipix "GET/SET" "TriggerOutTTLInvert"
 @medipix "GET/SET" "SCANX"
 @medipix "GET/SET" "SCANY"
+@medipix "GET/SET" "SELECTCHIPS"
 
 struct MedipixData
     id::Int64
@@ -290,48 +292,50 @@ function check_medipix_response(message)
     return success, value
 end
 
-function parse_data(io::IO, c)
+function parse_data(io::IO, fw)
     while true
         buffer = readuntil(io, ',')
         if length(buffer) >= 3 && buffer[end-2:end] == "MPX"
             break
         end
     end
+
     data_size = parse(Int, readuntil(io, ','))
-    hdr_or_frame = peek(io, Char)
     if data_size > 0
-        if hdr_or_frame == 'H'
-            hdr = String(read(io, data_size - 1))
-            put!(c, MedipixData(0, hdr, Matrix{UInt8}(undef, 1, 1)))
-        elseif hdr_or_frame == 'M'
-            data = read(io, data_size - 1)
-            @spawnat :any parse_image(data, c)
-        else
-            @error "Unknown data stream type."
-        end
+        data = read(io, data_size - 1)
+        @spawnat :any parse_image(data, fw)
     else
         @error "No data available to read."
     end
-    return
+    return nothing
 end
 
-function parse_image(frame_bytes::Vector{UInt8}, c; header_size=768)
-    header_string = String(frame_bytes[1:header_size])
-    header_split = split(header_string, ',')
-    image_id, header_size, dim_x, dim_y = parse.(Int, getindex(header_split, [2, 3, 5, 6]))
+function parse_image(data::Vector{UInt8}, fw)
+    hdr_or_frame = convert(Char, data[1])
 
-    # TODO: R64 may not work, but can be ignored for now since it's not the bottleneck.
-    type_dict = Dict("U1" => UInt8, "U8" => UInt8, "U08" => UInt8, 
-                    "U16" => UInt16, "U32" => UInt32, "U64" => UInt64, 
-                    "R64" => UInt16)
+    if hdr_or_frame == 'H'
+        hdr = String(data)
+        fw(MedipixData(0, hdr, Matrix{UInt8}(undef, 1, 1)))
+    elseif hdr_or_frame == 'M'
+        header_string = String(data[1:768])
+        header_split = split(header_string, ',')
+        image_id, header_size, dim_x, dim_y = parse.(Int, getindex(header_split, [2, 3, 5, 6]))
 
-    data_type = type_dict[header_split[7]]
-    image = reshape(reinterpret(data_type, frame_bytes[header_size+1:end]), (dim_x, dim_y))
-    put!(c, MedipixData(image_id, header_string, image))
+        # TODO: R64 may not work, but can be ignored for now since it's not the bottleneck.
+        type_dict = Dict("U1" => UInt8, "U8" => UInt8, "U08" => UInt8, 
+                        "U16" => UInt16, "U32" => UInt32, "U64" => UInt64, 
+                        "R64" => UInt16)
+
+        data_type = type_dict[header_split[7]]
+        image = reshape(reinterpret(data_type, data[header_size+1:end]), (dim_x, dim_y))
+        @async fw(MedipixData(image_id, header_string, image))
+    else
+        @error "Unknown data stream type."
+    end
     return nothing 
 end
 
-function acquisition(m::MedipixConnection, c_out; config_file::String="", cmds::Vector{String}=[""], verbose=false, kwargs...)
+function acquisition(m::MedipixConnection, fw; config_file::String="", cmds::Vector{String}=[""], verbose=false, kwargs...)
     check_connection(m)
     if !is_medipix_ready(m; verbose=verbose)
         abort_and_clear(m; verbose=verbose)
@@ -358,8 +362,8 @@ function acquisition(m::MedipixConnection, c_out; config_file::String="", cmds::
     if data_server_ready 
         n = parse(Int, send_cmd(m, get_numframestoacquire(); verbose=verbose))
         send_cmd(m, cmd_startacquisition(); verbose=verbose)
-        @async for i in range(1, length = n+1)
-            parse_data(m.data_client, c_out)
+        for _ in range(1, length = n+1)
+            parse_data(m.data_client, fw)
         end
     else
         @warn "Data client is not connected to the server. Acquisition aborted."
@@ -430,17 +434,16 @@ function troubleshoot(m::MedipixConnection; do_not_reset=true, verbose=true)
     return nothing
 end
 
-function file_writer(filename::String, c; max_digits=8)
-    @async while isopen(c) 
-        wait(c)
-        image = take!(c)
-        length(digits(image.id)) > max_digits ? max_digits += 4 : nothing
-        id_str = lpad(image.id, max_digits, "0")
+function file_writer(filename::String; max_digits=8)
+    function fw(mdata)
+        length(digits(mdata.id)) > max_digits ? max_digits += 4 : nothing
+        id_str = lpad(mdata.id, max_digits, "0")
         group_name = id_str[1:end-4]
         data_name = id_str[end-3:end]
-        h5write(filename * ".h5", "/group_" * group_name * "/image_" * data_name, image.data)
-        h5write(filename * ".h5", "/group_" * group_name * "/header_" * data_name, strip(image.header, '\0'))
+        h5write(filename * "_" * lpad(string(myid() - 1), 3, "0") * ".h5", "/group_" * group_name * "/image_" * data_name, mdata.data)
+        h5write(filename * "_" * lpad(string(myid() - 1), 3, "0") * ".h5", "/group_" * group_name * "/header_" * data_name, strip(mdata.header, '\0'))
     end
+    return fw
 end
 
 end # module
