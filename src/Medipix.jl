@@ -7,6 +7,7 @@ export medipix_connect, medipix_connect!
 export check_connection
 export close_connection
 export send_cmd
+export make_pid_dict
 export acquisition
 export to_config, from_config
 export is_medipix_ready
@@ -46,7 +47,9 @@ using Sockets: @ip_str, IPv4, TCPSocket, connect
 export @ip_str
 using Dates
 using HDF5: h5write
-using Distributed: @spawnat, myid
+using Distributed: @spawnat, myid, remotecall
+using Dates
+using IterTools: product
 
 export load_mib
 
@@ -205,10 +208,10 @@ function check_connection(m::MedipixConnection)
     return nothing
 end
 
-function close_connection(m::MedipixConnection; log::String)
+function close_connection(m::MedipixConnection; log::String="")
     close(m.cmd_client)
     close(m.data_client)
-    if @isdefined log
+    if log != ""
         open(log, "a") do f
             [println(f, cl) for cl in m.cmd_log]
         end
@@ -292,7 +295,7 @@ function check_medipix_response(message)
     return success, value
 end
 
-function parse_data(io::IO, fw)
+function parse_data(io::IO, fw; pid=1)
     while true
         buffer = readuntil(io, ',')
         if length(buffer) >= 3 && buffer[end-2:end] == "MPX"
@@ -303,7 +306,12 @@ function parse_data(io::IO, fw)
     data_size = parse(Int, readuntil(io, ','))
     if data_size > 0
         data = read(io, data_size - 1)
-        @spawnat :any parse_image(data, fw)
+        if pid == 1 
+            # @spawnat :any parse_image(data, fw)
+            remotecall(parse_image, 2, data, fw)
+        else
+            remotecall(parse_image, pid, data, fw)
+        end
     else
         @error "No data available to read."
     end
@@ -335,7 +343,20 @@ function parse_image(data::Vector{UInt8}, fw)
     return nothing 
 end
 
-function acquisition(m::MedipixConnection, fw; config_file::String="", cmds::Vector{String}=[""], verbose=false, kwargs...)
+function make_pid_dict(scan_size, block_size)
+    pid_dict = zeros(Int, first(scan_size), last(scan_size))
+
+    p1 = collect(Iterators.partition(1:first(scan_size), first(block_size)))
+    p2 = collect(Iterators.partition(1:last(scan_size), last(block_size)))
+    p = collect(product(p1, p2))
+
+    for i in eachindex(p)
+        map(x -> pid_dict[x...] = i, product(p[i]...))
+    end
+    return pid_dict
+end
+
+function acquisition(m::MedipixConnection, fw; pid_dict=Matrix{Int}[], config_file::String="", cmds::Vector{String}=[""], verbose=false, kwargs...)
     check_connection(m)
     if !is_medipix_ready(m; verbose=verbose)
         abort_and_clear(m; verbose=verbose)
@@ -362,8 +383,14 @@ function acquisition(m::MedipixConnection, fw; config_file::String="", cmds::Vec
     if data_server_ready 
         n = parse(Int, send_cmd(m, get_numframestoacquire(); verbose=verbose))
         send_cmd(m, cmd_startacquisition(); verbose=verbose)
-        for _ in range(1, length = n+1)
-            parse_data(m.data_client, fw)
+        for i in range(1, length = n+1)
+            if isempty(pid_dict)
+                parse_data(m.data_client, fw)
+            elseif i == 1
+                parse_data(m.data_client, fw; pid=2)
+            else
+                parse_data(m.data_client, fw; pid=pid_dict[i-1]+1)
+            end
         end
     else
         @warn "Data client is not connected to the server. Acquisition aborted."
@@ -434,7 +461,13 @@ function troubleshoot(m::MedipixConnection; do_not_reset=true, verbose=true)
     return nothing
 end
 
-function file_writer(filename::String; max_digits=8)
+function file_writer(filename::String; max_digits=8, time_stamp=true)
+    if time_stamp
+        path_split = splitpath(filename) |> x -> insert!(x, length(x), Dates.format(now(), "yyyymmdd_HHMMSS"))
+        filename = joinpath(path_split)
+        dirname = joinpath(path_split[1:end-1])
+        isdir(dirname) ? nothing : mkdir(dirname)
+    end
     function fw(mdata)
         length(digits(mdata.id)) > max_digits ? max_digits += 4 : nothing
         id_str = lpad(mdata.id, max_digits, "0")
