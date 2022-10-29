@@ -308,9 +308,9 @@ function parse_data(io::IO, fw; pid=1)
         data = read(io, data_size - 1)
         if pid == 1 
             # @spawnat :any parse_image(data, fw)
-            remotecall(parse_image, 2, data, fw)
+            finalize(remotecall(parse_image, 2, data, fw))
         else
-            remotecall(parse_image, pid, data, fw)
+            finalize(remotecall(parse_image, pid, data, fw))
         end
     else
         @error "No data available to read."
@@ -336,7 +336,7 @@ function parse_image(data::Vector{UInt8}, fw)
 
         data_type = type_dict[header_split[7]]
         image = reshape(reinterpret(data_type, data[header_size+1:end]), (dim_x, dim_y))
-        @async fw(MedipixData(image_id, header_string, image))
+        finalize(@async fw(MedipixData(image_id, header_string, image)))
     else
         @error "Unknown data stream type."
     end
