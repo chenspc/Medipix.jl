@@ -471,8 +471,8 @@ function file_writer(filename::String; max_digits=8, time_stamp=true)
     function fw(mdata)
         length(digits(mdata.id)) > max_digits ? max_digits += 4 : nothing
         id_str = lpad(mdata.id, max_digits, "0")
-        h5write(filename * "_" * lpad(string(myid() - 1), 3, "0") * ".h5", * "/image_" * id_str, mdata.data)
-        h5write(filename * "_" * lpad(string(myid() - 1), 3, "0") * ".h5", * "/header_" * id_str, strip(mdata.header, '\0'))
+        h5write(filename * "_" * lpad(string(myid() - 1), 3, "0") * ".h5", "/image_" * id_str, mdata.data)
+        h5write(filename * "_" * lpad(string(myid() - 1), 3, "0") * ".h5", "/header_" * id_str, strip(mdata.header, '\0'))
     end
     return fw
 end
