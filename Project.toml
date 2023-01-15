@@ -1,7 +1,7 @@
 name = "Medipix"
 uuid = "c2036f84-fecd-45db-822d-61dbed506f2f"
 authors = ["Chen Huang <chen1huang2@gmail.com> and contributors"]
-version = "0.4.0"
+version = "0.5.0"
 
 [deps]
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
@@ -14,6 +14,7 @@ Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 [compat]
 DataFrames = "1"
 HDF5 = "0.16, 1.0"
+IterTools = "1.4"
 julia = "1.5"
 
 [extras]
