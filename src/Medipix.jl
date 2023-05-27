@@ -42,6 +42,7 @@ export get_triggeroutttlinvert, set_triggeroutttlinvert
 export get_scanx, set_scanx
 export get_scany, set_scany
 export get_selectchips, set_selectchips
+export get_scantriggermode, set_scantriggermode
 
 using Sockets: @ip_str, IPv4, TCPSocket, connect
 export @ip_str
@@ -99,6 +100,7 @@ end
 @medipix "GET/SET" "SCANX"
 @medipix "GET/SET" "SCANY"
 @medipix "GET/SET" "SELECTCHIPS"
+@medipix "GET/SET" "SCANTRIGGERMODE"
 
 struct MedipixData
     id::Int64
