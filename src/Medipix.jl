@@ -337,7 +337,7 @@ function parse_image(data::Vector{UInt8}, fw)
                         "R64" => UInt16)
 
         data_type = type_dict[header_split[7]]
-        image = reshape(reinterpret(data_type, data[header_size+1:end]), (dim_x, dim_y))
+        image = hton.(reshape(reinterpret(data_type, data[header_size+1:end]), (dim_x, dim_y)))
         finalize(@async fw(MedipixData(image_id, header_string, image)))
     else
         @error "Unknown data stream type."
