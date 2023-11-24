@@ -14,6 +14,8 @@ export is_medipix_ready
 export abort_and_clear
 export troubleshoot
 export file_writer
+export run_stream
+export run_acquisition
 
 export cmd_reset
 export cmd_abort
@@ -47,7 +49,7 @@ export get_scantriggermode, set_scantriggermode
 using Sockets: @ip_str, IPv4, TCPSocket, connect
 export @ip_str
 using Dates
-using HDF5: h5write
+using HDF5
 using Distributed: @spawnat, myid, remotecall
 using Dates
 using IterTools: product
@@ -226,6 +228,7 @@ function medipix_connect(medipix_ip::IPv4; cmd_port=6341, data_port=6342)
      cmd_client = connect(medipix_ip, cmd_port)
    return cmd_client, data_client
 end
+medipix_connect(; kwargs...) = medipix_connect(ip"127.0.0.1"; kwargs...)
 
 function medipix_connect!(m::MedipixConnection)
     m.cmd_client, m.data_client = medipix_connect(m.ip; cmd_port=m.cmd_port, data_port=m.data_port)
@@ -459,6 +462,130 @@ function troubleshoot(m::MedipixConnection; do_not_reset=true, verbose=true)
     elseif status == "Armed"
     elseif status == "Init"
     else
+    end
+    return nothing
+end
+
+function make_image(data::Vector{UInt8})
+    hdr_or_frame = convert(Char, data[1])
+
+    if hdr_or_frame == 'H'
+        hdr = String(data)
+        return MedipixData(0, hdr, Matrix{UInt8}(undef, 1, 1))
+    elseif hdr_or_frame == 'M'
+        header_string = String(data[1:768])
+        header_split = split(header_string, ',')
+        image_id, header_size, dim_x, dim_y = parse.(Int, getindex(header_split, [2, 3, 5, 6]))
+
+        # TODO: R64 may not work, but can be ignored for now since it's not the bottleneck.
+        type_dict = Dict("U1" => UInt8, "U8" => UInt8, "U08" => UInt8, 
+                        "U16" => UInt16, "U32" => UInt32, "U64" => UInt64, 
+                        "R64" => UInt16)
+
+        data_type = type_dict[header_split[7]]
+        image = hton.(reshape(reinterpret(data_type, data[header_size+1:end]), (dim_x, dim_y)))
+        return MedipixData(image_id, header_string, image)
+    else
+        @error "Unknown data stream type."
+    end
+    
+    return nothing
+end
+
+function producer(channel::Channel, io, frames=0)
+    counter = 0
+    while isopen(channel)
+        if frames > 0 && counter >= frames
+            break
+        end
+        while true
+            buffer = readuntil(io, ',')
+            if length(buffer) >= 3 && buffer[end-2:end] == "MPX"
+                break
+            end
+        end
+
+        data_size = parse(Int, readuntil(io, ','))
+        if data_size > 0
+            data = read(io, data_size - 1)
+        else
+            @error "No data available to read."
+        end
+        put!(channel, make_image(data))
+        counter += 1
+    end
+    return nothing
+end
+
+function consumer(channel::Channel, filepath, frames=0; nfiles=1, file_indices=Int[])
+    counter = 0
+    file_handles = Dict{Int, HDF5.File}()
+    for digit in 1:nfiles
+        file_handles[digit] = h5open(filepath * "_" * lpad(string(digit), 3, "0") * ".h5", "w")
+    end
+
+    function write_image(i, image; file_index=0)
+        if file_index == 0
+            file_idx = i % nfiles == 0 ? nfiles : i % nfiles
+        else
+            file_idx = file_index
+        end
+        file_to_write = file_handles[file_idx]
+        write_dataset = "image_" * lpad(string(i), 8, "0")
+        file_to_write[write_dataset] = image
+    end
+
+    while isopen(channel)
+        if frames > 0 && counter >= frames
+            break
+        end
+        mdata = take!(channel)
+        fi = 1 <= mdata.id <= length(file_indices) ? file_indices[mdata.id] : 0
+        Threads.@spawn write_image(mdata.id, mdata.data; file_index=fi)
+        counter += 1
+    end
+    sleep(1)
+    close(channel)
+    foreach(close, values(file_handles))
+end
+
+function run_stream(io, filepath; frames=0, channel_size=10000, nfiles=1, file_indices=Int[])
+    channel = Channel(channel_size)
+    @async producer(channel, io, frames)
+    consumer(channel, filepath, frames; nfiles=nfiles, file_indices=file_indices)
+    return nothing
+end
+
+function run_acquisition(m::MedipixConnection, filepath; config_file::String="", cmds::Vector{String}=[""], verbose=false, nfiles=1, file_indices=Int[], kwargs...)
+    check_connection(m)
+    if !is_medipix_ready(m; verbose=verbose)
+        abort_and_clear(m; verbose=verbose)
+    end
+
+    if !is_medipix_ready(m; verbose=verbose)
+        send_cmd(m, cmd_reset(); verbose=verbose)
+        sleep(10)
+        check_connection(m)
+        abort_and_clear(m; verbose=verbose)
+        medipix_connect!(m)
+    end
+
+    if isfile(config_file)
+        file_cmds = from_config(config_file; kwargs...)
+    else
+        file_cmds = [""]
+    end
+
+    file_cmds = isfile(config_file) ? from_config(config_file; kwargs...) : [""]
+    send_cmd(m, vcat(file_cmds, cmds); verbose=verbose)
+    data_server_ready = send_cmd(m, get_tcpconnected(); verbose=verbose) == "1"
+
+    if data_server_ready 
+        n = parse(Int, send_cmd(m, get_numframestoacquire(); verbose=verbose))
+        send_cmd(m, cmd_startacquisition(); verbose=verbose)
+        run_stream(m.data_client, filepath; frames=n+1, nfiles=nfiles, file_indices=file_indices)
+    else
+        @warn "Data client is not connected to the server. Acquisition aborted."
     end
     return nothing
 end
