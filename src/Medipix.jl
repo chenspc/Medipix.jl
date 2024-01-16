@@ -535,18 +535,21 @@ function consumer(channel::Channel, filepath, frames=0; nfiles=1, file_indices=I
         file_to_write[write_dataset] = image
     end
 
-    while isopen(channel)
-        if frames > 0 && counter >= frames
-            break
+    try
+        while isopen(channel)
+            if frames > 0 && counter >= frames
+                break
+            end
+            mdata = take!(channel)
+            fi = 1 <= mdata.id <= length(file_indices) ? file_indices[mdata.id] : 0
+            Threads.@spawn write_image(mdata.id, mdata.data; file_index=fi)
+            counter += 1
         end
-        mdata = take!(channel)
-        fi = 1 <= mdata.id <= length(file_indices) ? file_indices[mdata.id] : 0
-        Threads.@spawn write_image(mdata.id, mdata.data; file_index=fi)
-        counter += 1
+    finally
+        sleep(1)
+        close(channel)
+        foreach(close, values(file_handles))
     end
-    sleep(1)
-    close(channel)
-    foreach(close, values(file_handles))
 end
 
 function run_stream(io, filepath; frames=0, channel_size=10000, nfiles=1, file_indices=Int[])
